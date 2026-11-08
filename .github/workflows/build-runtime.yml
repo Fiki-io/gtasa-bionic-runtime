@@ -1,0 +1,110 @@
+name: Build GTA SA Bionic Hangover Runtime (ARM64 Mali)
+
+on:
+  workflow_dispatch:
+    inputs:
+      hangover_tag:
+        description: 'AndreRH/hangover release tag to build'
+        required: true
+        default: 'hangover-11.16'
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/build-runtime.yml'
+    tags:
+      - 'runtime-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-wow64-emulators:
+    name: Build PE32 Emulators (wowbox64.dll & libwow64fex.dll)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cross-compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            cmake \
+            ninja-build \
+            python3 \
+            git \
+            curl \
+            xz-utils \
+            pkg-config
+
+      - name: Compile wowbox64.dll and prepare libwow64fex.dll
+        env:
+          HANGOVER_TAG: ${{ inputs.hangover_tag || 'hangover-11.16' }}
+        run: |
+          chmod +x scripts/build-wow64-emulators.sh
+          ./scripts/build-wow64-emulators.sh "${RUNNER_TEMP}/hangover-work" "${RUNNER_TEMP}/out-dlls"
+
+      - name: Upload compiled WOW64 DLLs
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow64-emulator-dlls-arm64
+          path: |
+            ${{ runner.temp }}/out-dlls/*
+          if-no-files-found: error
+
+  build-bionic-runtime:
+    name: Assemble & Verify Android Bionic Runtime Archive
+    needs: build-wow64-emulators
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install archive & ELF verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg binutils xz-utils python3
+
+      - name: Download compiled WOW64 DLLs
+        uses: actions/download-artifact@v4
+        with:
+          name: wow64-emulator-dlls-arm64
+          path: ${{ runner.temp }}/out-dlls
+
+      - name: Resolve & Download Verified Bionic ARM64 Packages
+        run: |
+          chmod +x scripts/fetch-bionic-deps.py
+          python3 scripts/fetch-bionic-deps.py "${RUNNER_TEMP}/bionic-debs"
+
+      - name: Strip, Verify ELF Dependencies & Package GTA SA Bionic Runtime
+        run: |
+          chmod +x scripts/package-gtasa-bionic-runtime.sh
+          ./scripts/package-gtasa-bionic-runtime.sh \
+            "${RUNNER_TEMP}/bionic-debs" \
+            "${RUNNER_TEMP}/out-dlls" \
+            "${GITHUB_WORKSPACE}/dist"
+
+      - name: Upload GTA SA Bionic Runtime Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: gtasa-bionic-runtime-arm64
+          path: |
+            dist/gtasa-bionic-runtime-arm64.tar.xz
+            dist/gtasa-bionic-runtime-arm64.tar.xz.sha256
+            dist/runtime-manifest.json
+          if-no-files-found: error
+
+      - name: Publish Release Assets (on tag push)
+        if: startsWith(github.ref, 'refs/tags/runtime-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/gtasa-bionic-runtime-arm64.tar.xz
+            dist/gtasa-bionic-runtime-arm64.tar.xz.sha256
+            dist/runtime-manifest.json
+          generate_release_notes: true
